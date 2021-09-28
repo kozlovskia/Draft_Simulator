@@ -2,6 +2,7 @@ import time
 import requests
 from pathlib import Path
 from multiprocessing import Process
+import json
 
 import pandas as pd
 import numpy as np
@@ -155,11 +156,83 @@ def drop_duplicates(region, matchids_csv_path):
     print(f'Processed {region} in {round(time.time() - t0, 2)} sec(s)...')
 
 
+def get_matches(api_key, region, out_df_path, matchids_csv_path, start=0):
+
+    columns = ['platformId', 'queueId', 'gameId', 'gameVersion', 'winner']
+    for i in range(1, 11):
+        columns.append(f'participant_{i}_team')
+        columns.append(f'participant_{i}_champ')
+
+    if not Path(out_df_path).exists():
+        out_df = pd.DataFrame(columns=columns)
+    else:
+        out_df = pd.read_csv(out_df_path)
+
+    df = pd.read_csv(matchids_csv_path)
+    out_dict = {column: [] for column in columns}
+
+    for i, row in df.iterrows():
+
+        if i < start:
+            continue
+
+        reg = row['region']
+        game_id = row['gameId']
+        URL = 'https://' + reg + '.api.riotgames.com/lol/match/v4/matches/' + str(game_id) + '?api_key=' + api_key
+
+        response = requests.get(URL)
+        if response.status_code == 404:
+            print(f"Region: {region} | Error | status code: {response.status_code}")
+            continue
+        while response.status_code != 200:
+            time.sleep(5)
+            print(f"Region: {region} | Can't get response...waiting | status code: {response.status_code}")
+            response = requests.get(URL)
+        response_json = response.json()
+        if len(response_json) == 0:
+            break
+
+        if not response_json['gameVersion'].startswith('11.'):  # filter games that were played before S2021
+            continue
+
+        out_dict['platformId'].append(response_json['platformId'])
+        out_dict['queueId'].append(response_json['queueId'])
+        out_dict['gameId'].append(response_json['gameId'])
+        out_dict['gameVersion'].append(response_json['gameVersion'])
+        winner = np.nan
+        for team in response_json['teams']:
+            if team['win'] == 'Win':
+                winner = team['teamId']
+        out_dict['winner'].append(winner)
+
+        for participant in response_json['participants']:
+            participant_id = participant['participantId']
+            out_dict[f'participant_{participant_id}_team'].append(participant['teamId'])
+            out_dict[f'participant_{participant_id}_champ'].append(participant['championId'])
+
+        if i % 100 == 0 and i != 0:
+            out_df = out_df.append(pd.DataFrame(data=out_dict), ignore_index=False)
+            out_df.to_csv(out_df_path, index=False)
+            print(f'Region: {region} | Checkpoint {i}...')
+            out_dict = {column: [] for column in columns}
+            with open('utils/checkpoints.json', 'r') as f:
+                checkpoints = json.load(f)
+                checkpoints[region] = i
+            with open('utils/checkpoints.json', 'w') as f:
+                json.dump(checkpoints, f)
+
+        print(f'Region: {region} | Processed {i}...')
+
+    out_df = out_df.append(pd.DataFrame(data=out_dict), ignore_index=False)
+    out_df.to_csv(out_df_path, index=False)
+
+
 if __name__ == '__main__':
-    api_key = 'RGAPI-9079c922-3c92-4362-9675-6e8ec9210f16'
+    api_key = 'RGAPI-c0929ec2-6bb8-4a1e-a187-c37bc3e8894a'
     regions = ['eun1', 'euw1', 'kr', 'na1']
     divisions = ['I', 'II', 'III', 'IV']
-    starts = {'eun1': 0, 'euw1': 0, 'kr': 0, 'na1': 0}
+    with open('utils/checkpoints.json', 'r') as f:
+        starts = json.load(f)
 
     # for region in regions:
     #     for div in divisions:
@@ -172,7 +245,9 @@ if __name__ == '__main__':
         #                                                     f'data/summoners_{region}.csv', starts[region])))
         # processes.append(Process(target=get_match_ids, args=(api_key, region, f'data/matchid_{region}.csv',
         #                                                      f'data/accounts_{region}.csv', starts[region])))
-        processes.append(Process(target=drop_duplicates, args=(region, f'data/matchid_{region}.csv')))
+        # processes.append(Process(target=drop_duplicates, args=(region, f'data/matchid_{region}.csv')))
+        processes.append(Process(target=get_matches, args=(api_key, region, f'data/matches_{region}.csv',
+                                                           f'data/matchids_nodup_{region}.csv', starts[region] + 1)))
 
     for p in processes:
         p.start()
